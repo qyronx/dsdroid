@@ -45,8 +45,15 @@ jobs:
             ls -l "app/src/main/jniLibs/$ABI"
           done
 
-      - name: Build debug APK
-        run: gradle assembleDebug --stacktrace
+      - name: Build debug APK (네트워크 오류 대비 최대 3회 재시도)
+        run: |
+          for i in 1 2 3; do
+            if [ "$i" -eq 1 ]; then EXTRA=""; else EXTRA="--refresh-dependencies"; fi
+            gradle assembleDebug --stacktrace --no-daemon $EXTRA && exit 0
+            echo "빌드 실패 (시도 $i/3) - 30초 후 재시도"
+            sleep 30
+          done
+          exit 1
 
       - name: Rename APK
         run: cp app/build/outputs/apk/debug/app-debug.apk DSDroid.apk
