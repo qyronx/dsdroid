@@ -14,7 +14,7 @@ import java.util.zip.ZipOutputStream
 
 /**
  * 앱 내부 저장소 구조
- *  roms/*.nds                    (백업 대상 아님 - 롬은 직접 복사)
+ *  roms/<파일>.nds                   (백업 대상 아님 - 롬은 직접 복사)
  *  gamedata/<게임키>/battery.sav  게임 데이터(SRAM, 인게임 저장)
  *  gamedata/<게임키>/state_N.bin  진행 상황(세이브 스테이트) N=1..4, state_auto.bin = 자동 이어하기
  *  gamedata/<게임키>/cheats.txt   선택한 치트 목록

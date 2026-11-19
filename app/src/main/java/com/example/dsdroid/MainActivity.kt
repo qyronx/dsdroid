@@ -37,7 +37,7 @@ class MainActivity : AppCompatActivity() {
         runBusy("롬 가져오는 중…") {
             var ok = 0; var fail = 0
             for (u in uris) { if (store.importRom(u) != null) ok++ else fail++ }
-            "추가 $ok개" + if (fail > 0) " / 실패 $fail개 (.nds 만 지원)" else ""
+            "추가 ${ok}개" + if (fail > 0) " / 실패 ${fail}개 (.nds 만 지원)" else ""
         }
     }
     private val pickCheat = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
