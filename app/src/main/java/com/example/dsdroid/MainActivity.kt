@@ -43,7 +43,8 @@ class MainActivity : AppCompatActivity() {
     private val pickCheat = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@registerForActivityResult
         runBusy("치트 DB 확인 중…") {
-            if (store.importCheatDb(uri)) "usercheat.dat 적용 완료" else "올바른 usercheat.dat(R4 형식)이 아닙니다"
+            if (store.importCheatDb(uri)) "usercheat.dat 적용 완료\n" + store.cheatSummary()
+            else "올바른 usercheat.dat(R4 형식)이 아닙니다.\n(파일 첫 부분에 'R4 CheatCode' 헤더가 있어야 합니다)"
         }
     }
     private val createBackup = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
@@ -112,13 +113,17 @@ class MainActivity : AppCompatActivity() {
         })
 
         rootLayout.addView(row(
-            btn("＋ 롬 추가", 0xFF4361EE.toInt()) { pickRoms.launch(arrayOf("*/*")) },
-            btn("🧪 치트 DB(usercheat.dat)", 0xFF7B2CBF.toInt()) { pickCheat.launch(arrayOf("*/*")) }
+            btn("롬 추가", 0xFF4361EE.toInt()) { pickRoms.launch(arrayOf("*/*")) },
+            btn("치트 DB (usercheat.dat)", 0xFF7B2CBF.toInt()) { pickCheat.launch(arrayOf("*/*")) }
         ))
         rootLayout.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
         rootLayout.addView(row(
-            btn("📤 백업 만들기", 0xFF2A9D8F.toInt()) { createBackup.launch(store.suggestedBackupName()) },
-            btn("📥 백업 복원", 0xFFE76F51.toInt()) { pickRestore.launch(arrayOf("application/zip", "application/octet-stream", "*/*")) }
+            btn("백업 만들기", 0xFF2A9D8F.toInt()) { createBackup.launch(store.suggestedBackupName()) },
+            btn("백업 복원", 0xFFE76F51.toInt()) { pickRestore.launch(arrayOf("application/zip", "application/octet-stream", "*/*")) }
+        ))
+        rootLayout.addView(View(this), LinearLayout.LayoutParams(1, dp(8)))
+        rootLayout.addView(row(
+            btn("성능 설정", 0xFF3A3C5C.toInt()) { showPerf() }
         ))
 
         cheatStatus = TextView(this).apply { textSize = 12f; setTextColor(0xFF9A9CC0.toInt()); setPadding(0, dp(10), 0, dp(6)) }
@@ -135,7 +140,7 @@ class MainActivity : AppCompatActivity() {
             setOnItemLongClickListener { _, _, pos, _ -> showRomMenu(roms[pos]); true }
         }
         empty = TextView(this).apply {
-            text = "아직 롬이 없어요.\n위의 '＋ 롬 추가'를 눌러 .nds 파일을 선택하세요."
+            text = "아직 롬이 없어요.\n위의 '롬 추가'를 눌러 .nds 파일을 선택하세요."
             setTextColor(0xFF9A9CC0.toInt()); gravity = Gravity.CENTER; textSize = 14f
         }
         rootLayout.addView(listView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -151,6 +156,25 @@ class MainActivity : AppCompatActivity() {
         cheatStatus.text = if (store.cheatDbFile.isFile)
             "치트 DB: usercheat.dat 적용됨 (${store.cheatDbFile.length() / 1024} KB)"
         else "치트 DB: 없음 — usercheat.dat 을 불러오면 게임 중 치트 메뉴에서 사용할 수 있어요"
+    }
+
+    private fun showPerf() {
+        val fsNames = arrayOf("끔 (가장 부드러움)", "1프레임 건너뛰기", "2프레임 건너뛰기")
+        val items = arrayOf(
+            "프레임 스킵: " + fsNames[store.frameskip],
+            "정확한 타이밍: " + if (store.accurateTiming) "켬 (느림)" else "끔 (빠름, 권장)"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("성능 설정 (다음 게임 실행부터 적용)")
+            .setItems(items) { _, i ->
+                when (i) {
+                    0 -> store.frameskip = (store.frameskip + 1) % 3
+                    1 -> store.accurateTiming = !store.accurateTiming
+                }
+                showPerf()
+            }
+            .setPositiveButton("닫기", null)
+            .show()
     }
 
     private fun showRomMenu(r: Store.RomEntry) {
@@ -189,7 +213,7 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = AbsListViewLayoutParams()
             }
             val saved = store.hasData(r.info.key)
-            val sub = r.info.gameCode + (if (saved) "  ·  💾 저장 데이터 있음" else "")
+            val sub = r.info.gameCode + (if (saved) "  |  저장 데이터 있음" else "")
             tv.text = android.text.SpannableStringBuilder().apply {
                 append(r.info.title)
                 append("\n")

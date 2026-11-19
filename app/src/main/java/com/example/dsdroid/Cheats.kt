@@ -115,71 +115,140 @@ object R4CheatDb {
         return try { String(d, from, len, Charset.forName("x-windows-949")) } catch (e: Exception) { utf8 }
     }
 
-    fun findGame(data: ByteArray, info: RomInfo): CheatGame? {
-        val serial = info.gameCode
+    /** 검색 결과. exact=false 면 게임코드만 일치(헤더 CRC 불일치, 다른 버전일 수 있음). */
+    class Lookup(
+        val game: CheatGame?,
+        val exact: Boolean,
+        val dbGames: Int,
+        val sameSerial: Int,
+        val diag: String
+    )
+
+    private class IndexEntry(val serial: String, val crc: Long, val addr: Long)
+
+    private fun readIndex(data: ByteArray): List<IndexEntry> {
+        val list = ArrayList<IndexEntry>()
         var pos = 0x100
         try {
-            while (pos + 24 <= data.size) {
-                val s = String(data, pos, 4, Charsets.ISO_8859_1)
-                val crc = u32(data, pos + 4)
+            while (pos + 16 <= data.size) {
                 val addr = u64(data, pos + 8)
                 if (addr == 0L) break
-                if (s == serial && (crc == info.crcDb || crc == info.crcStd)) {
-                    return parseGame(data, addr.toInt())
-                }
+                val s = String(data, pos, 4, Charsets.ISO_8859_1)
+                list.add(IndexEntry(s, u32(data, pos + 4), addr))
                 pos += 16
             }
         } catch (_: Exception) {
         }
-        return null
+        return list
+    }
+
+    fun countGames(data: ByteArray): Int = readIndex(data).size
+
+    fun findGame(data: ByteArray, info: RomInfo): CheatGame? = lookup(data, info).game
+
+    /** 게임코드 + 헤더 CRC 로 찾고, CRC 가 안 맞으면 같은 게임코드 항목으로 폴백한다. */
+    fun lookup(data: ByteArray, info: RomInfo): Lookup {
+        val index = readIndex(data)
+        val serial = info.gameCode
+        val sameSerial = index.filter { it.serial == serial || it.serial.reversed() == serial }
+        val exact = sameSerial.filter { it.crc == info.crcDb || it.crc == info.crcStd }
+        for (e in exact) {
+            val g = parseGame(data, e.addr.toInt())
+            if (g != null) return Lookup(g, true, index.size, sameSerial.size, "")
+        }
+        for (e in sameSerial) {
+            if (exact.contains(e)) continue
+            val g = parseGame(data, e.addr.toInt())
+            if (g != null) return Lookup(g, false, index.size, sameSerial.size, "")
+        }
+        val diag = buildString {
+            append("게임코드: ").append(serial).append('\n')
+            append("헤더 CRC: ").append(String.format("%08X", info.crcStd))
+            append(" / ").append(String.format("%08X", info.crcDb)).append('\n')
+            append("DB 게임 수: ").append(index.size).append('\n')
+            if (sameSerial.isEmpty()) append("DB 에 이 게임코드가 없습니다.")
+            else append("게임코드는 있으나(").append(sameSerial.size).append("건) 치트 데이터를 해석하지 못했습니다.")
+        }
+        return Lookup(null, false, index.size, sameSerial.size, diag)
     }
 
     private class Folder(val name: String, var remaining: Int)
 
-    private fun align4(v: Int) = (v + 3) and 3.inv()
+    private class Parsed(val items: List<CheatItem>, val clean: Boolean)
+
+    /** 문자열 끝(NUL 다음)을 4바이트 경계로. p 는 NUL 의 위치. 절대 오프셋 기준. */
+    private fun alignAfterNul(p: Int) = (p + 4) and 3.inv()
 
     private fun parseGame(d: ByteArray, base: Int): CheatGame? {
+        if (base < 0 || base >= d.size) return null
         val titleEnd = cstrEnd(d, base)
         val title = decode(d, base, titleEnd)
-        val countOff = align4(titleEnd + 4)
-        val count = u32(d, countOff).toInt()
-        var cmd = countOff + 36
+        // 제목 뒤 항목 수 위치 후보: 정상 정렬 / base 기준 정렬 / 예전(잘못된) 정렬
+        val cands = linkedSetOf(
+            alignAfterNul(titleEnd),
+            base + (((titleEnd - base) + 4) and 3.inv()),
+            align4(titleEnd + 4)
+        )
+        var best: List<CheatItem>? = null
+        for (c in cands) {
+            val p = parseItems(d, c) ?: continue
+            if (p.items.isEmpty()) continue
+            if (p.clean) return CheatGame(title, p.items)
+            if (best == null || p.items.size > best.size) best = p.items
+        }
+        return best?.let { CheatGame(title, it) }
+    }
+
+    private fun parseItems(d: ByteArray, countOff: Int): Parsed? {
+        val count = try { u32(d, countOff) } catch (_: Exception) { return null }
+        if (count < 1 || count > 20000) return null
+        var cmd = countOff + 36 // 항목 수(4) + 마스터코드(32)
         val items = ArrayList<CheatItem>()
         val stack = ArrayList<Folder>()
+        var i = 0L
+        var clean = true
         try {
-            for (i in 0 until count) {
+            while (i < 50000) {
+                if (i >= count && stack.none { it.remaining > 0 }) break
                 val v = u32(d, cmd)
-                val isFolder = (v and 0xF0000000L) == 0x10000000L
+                val kind = v and 0xF0000000L
+                if (kind != 0L && kind != 0x10000000L) { clean = false; break }
                 val nameOff = cmd + 4
                 val nameEnd = cstrEnd(d, nameOff)
-                val name = decode(d, nameOff, nameEnd)
+                if (nameEnd >= d.size) { clean = false; break }
                 val noteOff = nameEnd + 1
                 val noteEnd = cstrEnd(d, noteOff)
+                if (noteEnd >= d.size) { clean = false; break }
+                val name = decode(d, nameOff, nameEnd)
                 val note = decode(d, noteOff, noteEnd)
                 if (stack.isNotEmpty()) stack.last().remaining--
-                if (isFolder) {
+                val next = alignAfterNul(noteEnd)
+                if (kind == 0x10000000L) {
                     stack.add(Folder(name, (v and 0xFFFFFFL).toInt()))
-                    cmd = align4(noteEnd + 1)
+                    cmd = next
                 } else {
-                    val lenOff = align4(noteEnd + 1)
-                    val dwords = u32(d, lenOff).toInt()
-                    if (dwords in 2..0x400) {
+                    val dwords = u32(d, next).toInt()
+                    if (dwords < 0 || dwords > 0x1000 || next + 4 + dwords * 4 > d.size) { clean = false; break }
+                    if (dwords >= 2) {
                         val sb = StringBuilder()
                         var t = 0
                         while (t + 1 < dwords) {
                             if (sb.isNotEmpty()) sb.append('\n')
-                            sb.append(String.format("%08X %08X", u32(d, lenOff + 4 + t * 4), u32(d, lenOff + 8 + t * 4)))
+                            sb.append(String.format("%08X %08X", u32(d, next + 4 + t * 4), u32(d, next + 8 + t * 4)))
                             t += 2
                         }
-                        val folder = stack.lastOrNull()?.name
-                        items.add(CheatItem(folder, name, note, sb.toString()))
+                        items.add(CheatItem(stack.lastOrNull()?.name, name, note, sb.toString()))
                     }
-                    cmd += (((v and 0xFFFFFFL) + 1) * 4).toInt()
+                    cmd = next + 4 + dwords * 4
                 }
                 while (stack.isNotEmpty() && stack.last().remaining <= 0) stack.removeAt(stack.size - 1)
+                i++
             }
         } catch (_: Exception) {
+            clean = false
         }
-        return if (items.isEmpty()) null else CheatGame(title, items)
+        return Parsed(items, clean)
     }
+
+    private fun align4(v: Int) = (v + 3) and 3.inv()
 }

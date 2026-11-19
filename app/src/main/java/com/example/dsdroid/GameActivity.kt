@@ -24,11 +24,13 @@ import com.swordfish.libretrodroid.GLRetroViewData
 import com.swordfish.libretrodroid.LibretroDroid
 import com.swordfish.libretrodroid.Variable
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.DateFormat
 import java.util.Date
+import java.util.concurrent.Executors
 
 class GameActivity : AppCompatActivity(), GamepadView.Listener {
 
@@ -47,6 +49,10 @@ class GameActivity : AppCompatActivity(), GamepadView.Listener {
     private var ready = false
     private var frames = 0
     private var cheatGame: CheatGame? = null
+    private var cheatMsg: String = ""
+    private var cheatNote: String = ""
+    private val io = Executors.newSingleThreadExecutor()
+    private var lastSram: ByteArray? = null
     private val enabledCheats = sortedSetOf<Int>()
     private var fast = false
     private var muted = false
@@ -54,7 +60,7 @@ class GameActivity : AppCompatActivity(), GamepadView.Listener {
 
     private val flush = object : Runnable {
         override fun run() {
-            if (ready) saveSram()
+            if (ready) flushSramAsync()
             handler.postDelayed(this, 30_000)
         }
     }
@@ -90,9 +96,17 @@ class GameActivity : AppCompatActivity(), GamepadView.Listener {
             gameFilePath = rom.absolutePath
             systemDirectory = store.systemDir.absolutePath
             savesDirectory = store.coreSaveDir(info.key).absolutePath
+            // 성능 우선 설정. (restart 가 필요한 옵션은 시작 시점에 지정해야 한다)
             variables = arrayOf(
                 Variable("desmume_screens_layout", "top/bottom"),
-                Variable("desmume_pointer_type", "touch")
+                Variable("desmume_pointer_type", "touch"),
+                // 버스 단위 정밀 타이밍은 매우 무거우므로 기본으로 끈다
+                Variable("desmume_advanced_timing", if (store.accurateTiming) "enabled" else "disabled"),
+                // 소프트웨어 3D 래스터라이저 멀티스레드 (너무 많으면 오히려 느려짐)
+                Variable("desmume_num_cores", "2"),
+                Variable("desmume_frameskip", store.frameskip.toString()),
+                // 롬을 메모리에 올려 저장소 읽기로 인한 끊김을 줄인다(너무 큰 롬은 제외)
+                Variable("desmume_load_to_memory", if (rom.length() <= 128L * 1024 * 1024) "enabled" else "disabled")
             )
             val sram = store.sramFile(info.key)
             if (sram.isFile) saveRAMState = sram.readBytes()
@@ -117,11 +131,16 @@ class GameActivity : AppCompatActivity(), GamepadView.Listener {
             override fun handleOnBackPressed() { showMenu() }
         })
 
-        lifecycleScope.launch {
+        // 매 프레임 이벤트가 메인 스레드로 오므로, 준비가 끝나면 바로 수집을 중단한다
+        var evJob: Job? = null
+        evJob = lifecycleScope.launch {
             retroView.getGLRetroEvents().collect { ev ->
-                if (ev is GLRetroView.GLRetroEvents.FrameRendered && !ready) {
+                if (ev is GLRetroView.GLRetroEvents.FrameRendered) {
                     frames++
-                    if (frames == 3) onCoreReady()
+                    if (frames == 3) {
+                        onCoreReady()
+                        evJob?.cancel()
+                    }
                 }
             }
         }
@@ -140,6 +159,12 @@ class GameActivity : AppCompatActivity(), GamepadView.Listener {
             lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             window.attributes = lp
         }
+        // 고주사율(90/120Hz) 화면에서 60fps 게임의 프레임 페이싱 불일치를 막는다
+        run {
+            val lp2 = window.attributes
+            lp2.preferredRefreshRate = 60f
+            window.attributes = lp2
+        }
         val c = WindowInsetsControllerCompat(window, window.decorView)
         c.hide(WindowInsetsCompat.Type.systemBars())
         c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -156,10 +181,19 @@ class GameActivity : AppCompatActivity(), GamepadView.Listener {
         }
         // 치트 로드(백그라운드)
         lifecycleScope.launch {
-            val g = withContext(Dispatchers.IO) {
-                R4CheatDb.load(store.cheatDbFile)?.let { R4CheatDb.findGame(it, info) }
+            val lk = withContext(Dispatchers.IO) {
+                val db = R4CheatDb.load(store.cheatDbFile)
+                if (db == null) null else R4CheatDb.lookup(db, info)
             }
+            val g = lk?.game
             cheatGame = g
+            cheatNote = if (lk != null && g != null && !lk.exact) "\n(헤더 CRC 가 달라 같은 게임코드의 항목을 사용했습니다. 다른 버전이면 일부 치트가 맞지 않을 수 있습니다.)" else ""
+            cheatMsg = when {
+                !store.cheatDbFile.isFile -> "usercheat.dat 이 없습니다.\n첫 화면에서 '치트 DB 불러오기'로 가져오세요."
+                lk == null -> "usercheat.dat 을 읽을 수 없습니다. 올바른 R4 형식 파일인지 확인하세요."
+                g == null -> "usercheat.dat 에서 이 게임의 치트를 찾지 못했습니다.\n" + (lk?.diag ?: "")
+                else -> ""
+            }
             val sel = store.cheatSelFile(info.key)
             if (g != null && sel.isFile) {
                 sel.readText().split(',').mapNotNull { it.trim().toIntOrNull() }
@@ -173,8 +207,22 @@ class GameActivity : AppCompatActivity(), GamepadView.Listener {
     private fun saveSram(): Boolean {
         return try {
             val b = retroView.serializeSRAM()
-            if (b.isNotEmpty()) { store.writeAtomic(store.sramFile(info.key), b); true } else false
+            if (b.isNotEmpty()) { lastSram = b; store.writeAtomic(store.sramFile(info.key), b); true } else false
         } catch (_: Throwable) { false }
+    }
+
+    /** 직렬화는 GL 스레드와 맞춰야 하므로 여기서 하고, 파일 쓰기(fsync 포함)는 백그라운드에서 한다. 변경이 없으면 쓰지 않는다. */
+    private fun flushSramAsync() {
+        try {
+            val b = retroView.serializeSRAM()
+            if (b.isEmpty()) return
+            val prev = lastSram
+            if (prev != null && prev.contentEquals(b)) return
+            lastSram = b
+            val dest = store.sramFile(info.key)
+            io.execute { try { store.writeAtomic(dest, b) } catch (_: Throwable) {} }
+        } catch (_: Throwable) {
+        }
     }
 
     private fun saveState(slot: Int): Boolean {
@@ -202,6 +250,7 @@ class GameActivity : AppCompatActivity(), GamepadView.Listener {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        io.shutdown()
         super.onDestroy()
     }
 
@@ -247,16 +296,16 @@ class GameActivity : AppCompatActivity(), GamepadView.Listener {
         if (!ready) return
         pad.releaseAll()
         val items = arrayOf(
-            "▶  계속하기",
-            "💾  진행 상황 저장 (스테이트)",
-            "📂  진행 상황 불러오기 (스테이트)",
-            "🎮  게임 데이터 저장 (SRAM)",
-            "🎮  게임 데이터 다시 불러오기 (SRAM)",
-            "🧪  치트 설정",
-            if (fast) "⏩  배속: 2배 (끄기)" else "⏩  배속: 끔 (2배로)",
-            if (muted) "🔇  소리: 끔 (켜기)" else "🔊  소리: 켬 (끄기)",
-            "🔄  리셋",
-            "🚪  종료 (자동 저장)"
+            "계속하기",
+            "진행 상황 저장 (스테이트)",
+            "진행 상황 불러오기 (스테이트)",
+            "게임 데이터 저장 (SRAM)",
+            "게임 데이터 다시 불러오기 (SRAM)",
+            "치트 설정",
+            if (fast) "배속: 2배 (끄기)" else "배속: 끔 (2배로)",
+            if (muted) "소리: 끔 (켜기)" else "소리: 켬 (끄기)",
+            "리셋",
+            "종료 (자동 저장)"
         )
         AlertDialog.Builder(this)
             .setTitle(info.title)
@@ -305,15 +354,14 @@ class GameActivity : AppCompatActivity(), GamepadView.Listener {
     private fun showCheats() {
         val g = cheatGame
         if (g == null) {
-            val msg = if (!store.cheatDbFile.isFile) "usercheat.dat 이 없습니다.\n첫 화면에서 '치트 DB 불러오기'로 가져오세요."
-            else "usercheat.dat 에서 이 게임(${info.gameCode})의 치트를 찾지 못했습니다."
+            val msg = cheatMsg.ifEmpty { "치트 정보를 불러오는 중입니다. 잠시 후 다시 시도하세요." }
             AlertDialog.Builder(this).setTitle("치트").setMessage(msg).setPositiveButton("확인", null).show()
             return
         }
         val labels = Array(g.items.size) { g.items[it].label }
         val checked = BooleanArray(g.items.size) { enabledCheats.contains(it) }
         AlertDialog.Builder(this)
-            .setTitle("치트 · ${g.title}")
+            .setTitle("치트 - ${g.title}" + if (cheatNote.isNotEmpty()) " (CRC 불일치)" else "")
             .setMultiChoiceItems(labels, checked) { _, i, on -> checked[i] = on }
             .setPositiveButton("적용") { _, _ ->
                 enabledCheats.clear()
@@ -335,7 +383,8 @@ class GameActivity : AppCompatActivity(), GamepadView.Listener {
     /** 이 코어는 개별 끄기를 지원하지 않으므로: 목록 초기화 후 켜진 것만 다시 등록 */
     private fun applyCheats() {
         val g = cheatGame ?: return
-        val codes = enabledCheats.mapNotNull { g.items.getOrNull(it)?.code }
+        // libretro 규약: 여러 줄 코드는 '+' 로 연결해서 넘긴다
+        val codes = enabledCheats.mapNotNull { g.items.getOrNull(it)?.code?.replace('\n', '+') }
         retroView.queueEvent {
             try {
                 LibretroDroid.resetCheat()

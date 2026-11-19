@@ -34,6 +34,16 @@ class Store(private val ctx: Context) {
         get() = prefs.getBoolean("autoResume", true)
         set(v) = prefs.edit().putBoolean("autoResume", v).apply()
 
+    /** 성능 설정 (다음 게임 실행부터 적용) */
+    var frameskip: Int
+        get() = prefs.getInt("frameskip", 0).coerceIn(0, 2)
+        set(v) = prefs.edit().putInt("frameskip", v).apply()
+
+    /** 정확한 버스 타이밍: 켜면 일부 게임 호환성은 좋아지지만 많이 느려진다 */
+    var accurateTiming: Boolean
+        get() = prefs.getBoolean("accurateTiming", false)
+        set(v) = prefs.edit().putBoolean("accurateTiming", v).apply()
+
     fun gameDir(key: String) = File(dataRoot, key).apply { mkdirs() }
     fun coreSaveDir(key: String) = File(coreSaveRoot, key).apply { mkdirs() }
     fun sramFile(key: String) = File(gameDir(key), "battery.sav")
@@ -75,6 +85,25 @@ class Store(private val ctx: Context) {
         if (info == null) { dest.delete(); return null }
         metaFile(info.key).writeText(info.title)
         return RomEntry(dest, info)
+    }
+
+    /** 가져온 치트 DB 를 현재 롬 목록과 대조해 요약 문자열을 만든다 */
+    fun cheatSummary(): String {
+        val data = R4CheatDb.load(cheatDbFile) ?: return "치트 DB 를 읽지 못했습니다"
+        val roms = listRoms()
+        val sb = StringBuilder("DB 게임 수: ").append(R4CheatDb.countGames(data))
+        if (roms.isNotEmpty()) {
+            sb.append("\n\n내 롬 치트 인식 결과")
+            for (r in roms) {
+                val lk = R4CheatDb.lookup(data, r.info)
+                sb.append("\n- ").append(r.info.title).append(": ")
+                val g = lk.game
+                if (g == null) sb.append("치트 없음")
+                else if (lk.exact) sb.append("인식됨 (").append(g.items.size).append("개)")
+                else sb.append("인식됨 (").append(g.items.size).append("개, CRC 불일치 - 다른 버전일 수 있음)")
+            }
+        }
+        return sb.toString()
     }
 
     fun importCheatDb(uri: Uri): Boolean {

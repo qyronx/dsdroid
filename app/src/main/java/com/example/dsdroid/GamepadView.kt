@@ -64,6 +64,8 @@ class GamepadView(ctx: Context) : View(ctx) {
     }
 
     fun setGameRect(r: Rect) {
+        // onLayout 이 자주 호출되므로, 실제로 바뀐 경우에만 다시 계산/그리기
+        if (r == gameRect && width > 0) return
         gameRect = Rect(r)
         computeLayout()
         invalidate()
@@ -164,16 +166,19 @@ class GamepadView(ctx: Context) : View(ctx) {
             if (i == lift) continue
             now.addAll(hit(e.getX(i), e.getY(i)))
         }
+        var changed = false
         for (c in Ctl.values()) {
             val was = pressed.contains(c)
             val isNow = now.contains(c)
             if (was != isNow) {
+                changed = true
                 listener?.onKey(c.keyCode, isNow)
                 if (isNow && haptics) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
             }
         }
         pressed = now
-        invalidate()
+        // 손가락만 움직이고 눌린 키가 그대로면 다시 그리지 않는다(매 MOVE 마다 그리면 게임 프레임과 경쟁)
+        if (changed) invalidate()
         return true
     }
 

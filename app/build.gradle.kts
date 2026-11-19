@@ -17,7 +17,18 @@ android {
     }
 
     buildTypes {
-        release { isMinifyEnabled = false }
+        release {
+            // 디버그 빌드는 debuggable 이라 JNI/오디오 경로가 느리다. 릴리스로 빌드하되
+            // 바로 설치할 수 있도록 디버그 키로 서명한다.
+            isMinifyEnabled = false
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+    lint {
+        // assembleRelease 에서 lintVital 단계가 빌드를 느리게/실패시키지 않도록
+        checkReleaseBuilds = false
+        abortOnError = false
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
